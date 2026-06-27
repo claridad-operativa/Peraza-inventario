@@ -436,6 +436,8 @@ def status():
     }
 
 # Servir el frontend
-FRONTEND_DIR = BASE_DIR.parent / "frontend"
+FRONTEND_DIR = BASE_DIR / "frontend"
+if not FRONTEND_DIR.exists():
+    FRONTEND_DIR = BASE_DIR.parent / "frontend"
 if FRONTEND_DIR.exists():
     app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
