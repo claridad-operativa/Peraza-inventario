@@ -219,23 +219,41 @@ def crear_producto(p: Producto):
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, date('now'))
         """, (p.codigo, p.referencia, p.categoria, p.marca, p.cantidad,
               p.costo, p.precio1, p.precio2, p.stock_min, p.proveedor))
-        conn.commit()
         nuevo_id = cursor.lastrowid
+        conn.execute("""
+            INSERT INTO movimientos (producto_id, tipo, cantidad, stock_antes, stock_desp, nota)
+            VALUES (?, 'entrada', ?, 0, ?, 'Producto creado')
+        """, (nuevo_id, p.cantidad, p.cantidad))
+        conn.commit()
         conn.close()
         return {"ok": True, "id": nuevo_id, "mensaje": "Producto creado"}
     except sqlite3.IntegrityError:
         conn.close()
-        raise HTTPException(status_code=400, detail="Ya existe un producto con ese código, categoría y marca")
+        raise HTTPException(status_code=400, detail="Ya existe un producto con ese codigo, categoria y marca")
 
 @app.put("/api/productos/{producto_id}")
 def actualizar_producto(producto_id: int, p: Producto):
     conn = get_db()
+    prod_actual = conn.execute("SELECT cantidad FROM productos WHERE id=?", (producto_id,)).fetchone()
+    cant_antes = prod_actual["cantidad"] if prod_actual else 0
     conn.execute("""
         UPDATE productos SET codigo=?, referencia=?, categoria=?, marca=?,
                costo=?, precio1=?, precio2=?, stock_min=?, proveedor=?, fecha_act=date('now')
         WHERE id=?
     """, (p.codigo, p.referencia, p.categoria, p.marca,
           p.costo, p.precio1, p.precio2, p.stock_min, p.proveedor, producto_id))
+    if p.cantidad != cant_antes:
+        tipo = 'entrada' if p.cantidad > cant_antes else 'salida'
+        diff = abs(p.cantidad - cant_antes)
+        conn.execute("""
+            INSERT INTO movimientos (producto_id, tipo, cantidad, stock_antes, stock_desp, nota)
+            VALUES (?, ?, ?, ?, ?, 'Ajuste manual desde edicion')
+        """, (producto_id, tipo, diff, cant_antes, p.cantidad))
+    else:
+        conn.execute("""
+            INSERT INTO movimientos (producto_id, tipo, cantidad, stock_antes, stock_desp, nota)
+            VALUES (?, 'entrada', 0, ?, ?, 'Informacion del producto actualizada')
+        """, (producto_id, cant_antes, cant_antes))
     conn.commit()
     conn.close()
     return {"ok": True, "mensaje": "Producto actualizado"}
@@ -243,7 +261,13 @@ def actualizar_producto(producto_id: int, p: Producto):
 @app.delete("/api/productos/{producto_id}")
 def eliminar_producto(producto_id: int):
     conn = get_db()
+    prod = conn.execute("SELECT cantidad FROM productos WHERE id=?", (producto_id,)).fetchone()
+    cant = prod["cantidad"] if prod else 0
     conn.execute("UPDATE productos SET activo = 0 WHERE id = ?", (producto_id,))
+    conn.execute("""
+        INSERT INTO movimientos (producto_id, tipo, cantidad, stock_antes, stock_desp, nota)
+        VALUES (?, 'salida', ?, ?, 0, 'Producto eliminado del inventario')
+    """, (producto_id, cant, cant))
     conn.commit()
     conn.close()
     return {"ok": True, "mensaje": "Producto eliminado"}
@@ -435,9 +459,7 @@ def status():
         "fecha": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
 
-# Servir el frontend
-FRONTEND_DIR = BASE_DIR / "frontend"
-if not FRONTEND_DIR.exists():
-    FRONTEND_DIR = BASE_DIR.parent / "frontend"
+# Servir el frontend (debe ir al final)
+FRONTEND_DIR = BASE_DIR.parent / "frontend"
 if FRONTEND_DIR.exists():
     app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
