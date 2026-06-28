@@ -8,20 +8,20 @@
   @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Barlow+Condensed:wght@600;700&display=swap');
 
   :root {
-    --negro: #0a0a0a;
-    --negro2: #141414;
-    --negro3: #1e1e1e;
-    --negro4: #2a2a2a;
+    --negro: #f5f5f5;
+    --negro2: #ffffff;
+    --negro3: #f0f0f0;
+    --negro4: #e5e5e5;
     --rojo: #cc1111;
-    --rojo2: #e01515;
-    --rojo3: #ff2222;
+    --rojo2: #b50f0f;
+    --rojo3: #e01515;
     --gris: #888;
-    --gris2: #555;
-    --gris3: #333;
-    --blanco: #f0f0f0;
-    --blanco2: #c0c0c0;
-    --verde: #22c55e;
-    --amarillo: #f59e0b;
+    --gris2: #aaa;
+    --gris3: #d1d5db;
+    --blanco: #1a1a1a;
+    --blanco2: #374151;
+    --verde: #15803d;
+    --amarillo: #b45309;
     --radius: 6px;
   }
 
@@ -238,9 +238,9 @@
     letter-spacing: 0.3px;
   }
 
-  .badge-activo { background: #14532d; color: #86efac; }
-  .badge-reponer { background: #451a03; color: #fcd34d; }
-  .badge-sinstock { background: #450a0a; color: #fca5a5; }
+  .badge-activo { background: #dcfce7; color: #15803d; }
+  .badge-reponer { background: #fef3c7; color: #92400e; }
+  .badge-sinstock { background: #fee2e2; color: #991b1b; }
 
   .cant-cell {
     display: flex;
@@ -429,8 +429,8 @@
     transition: all 0.15s;
   }
 
-  .tipo-btn.entrada.selected { border-color: var(--verde); color: var(--verde); background: #052e16; }
-  .tipo-btn.salida.selected { border-color: var(--rojo); color: var(--rojo); background: #1f0505; }
+  .tipo-btn.entrada.selected { border-color: var(--verde); color: var(--verde); background: #dcfce7; }
+  .tipo-btn.salida.selected { border-color: var(--rojo); color: var(--rojo); background: #fee2e2; }
 
   /* ===== TOAST ===== */
   #toast {
@@ -475,8 +475,8 @@
     flex-shrink: 0;
   }
 
-  .mov-icon.entrada { background: #052e16; color: var(--verde); }
-  .mov-icon.salida { background: #1f0505; color: var(--rojo); }
+  .mov-icon.entrada { background: #dcfce7; color: var(--verde); }
+  .mov-icon.salida { background: #fee2e2; color: var(--rojo); }
 
   .mov-info { flex: 1; }
   .mov-cod { font-weight: 600; color: var(--blanco); }
@@ -595,11 +595,11 @@
   <div class="section" id="sec-inventario">
     <div class="table-wrap">
       <div class="table-toolbar">
-        <input class="search-box" type="text" id="buscar" placeholder="Buscar por código, referencia o marca..." oninput="renderTabla()">
-        <select class="filter" id="filtro-cat" onchange="renderTabla()">
+        <input class="search-box" type="text" id="buscar" placeholder="Buscar por código, referencia o marca..." oninput="paginaActual=1;cargarInventario()">
+        <select class="filter" id="filtro-cat" onchange="paginaActual=1;cargarInventario()">
           <option value="">Todas las categorías</option>
         </select>
-        <select class="filter" id="filtro-estado" onchange="renderTabla()">
+        <select class="filter" id="filtro-estado" onchange="paginaActual=1;cargarInventario()">
           <option value="">Todos los estados</option>
           <option value="Activo">Activo</option>
           <option value="Por Reponer">Por Reponer</option>
