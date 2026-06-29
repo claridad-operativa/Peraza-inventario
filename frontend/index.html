@@ -539,7 +539,6 @@
 <nav>
   <div class="tab active" onclick="showTab('dashboard')">Dashboard</div>
   <div class="tab" onclick="showTab('inventario')">Inventario</div>
-  <div class="tab" onclick="showTab('movimientos')">Movimientos</div>
   <div class="tab" onclick="showTab('historial')">Historial</div>
   <div class="tab" onclick="showTab('categorias')">Por Categoría</div>
   <div class="tab" onclick="showTab('respaldos')">💾 Respaldos</div>
@@ -640,39 +639,7 @@
   </div>
 
   <!-- ==================== MOVIMIENTOS ==================== -->
-  <div class="section" id="sec-movimientos">
-    <div class="mov-form">
-      <div class="section-title">Registrar movimiento</div>
-      <div class="mov-tipo">
-        <button class="tipo-btn entrada selected" id="btn-entrada" onclick="selTipo('entrada')">▲ Entrada (compra)</button>
-        <button class="tipo-btn salida" id="btn-salida" onclick="selTipo('salida')">▼ Salida (venta)</button>
-      </div>
-      <div class="form-row">
-        <div class="form-group">
-          <label>Código del producto</label>
-          <input type="text" id="mov-codigo" placeholder="Ej: 6205-2RS" oninput="buscarProductoMov()">
-        </div>
-        <div class="form-group">
-          <label>Cantidad</label>
-          <input type="number" id="mov-cantidad" min="1" value="1">
-        </div>
-      </div>
-      <div id="mov-preview" style="display:none; background:var(--negro3); border:1px solid var(--gris3); border-radius:6px; padding:14px; margin-bottom:14px;">
-        <div style="font-size:12px; color:var(--gris); margin-bottom:6px;">Producto encontrado</div>
-        <div id="mov-preview-info" style="font-weight:600; color:var(--blanco);"></div>
-        <div id="mov-stock-actual" style="font-size:12px; color:var(--gris); margin-top:4px;"></div>
-      </div>
-      <div class="form-group form-row full">
-        <div class="form-group">
-          <label>Nota (opcional)</label>
-          <input type="text" id="mov-nota" placeholder="Ej: Proveedor Almacén Central">
-        </div>
-      </div>
-      <button class="btn btn-rojo" onclick="registrarMovimiento()">Registrar movimiento</button>
-    </div>
-  </div>
-
-  <!-- ==================== HISTORIAL ==================== -->
+  
   <div class="section" id="sec-historial">
     <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; flex-wrap:wrap; gap:10px;">
       <div class="section-title" style="margin:0">Historial de movimientos</div>
@@ -888,8 +855,8 @@ function showTab(id) {
 async function cargarDashboard() {
   try {
     const data = await apiFetch('/api/dashboard');
-    document.getElementById('kpi-total').textContent    = data.referencias.toLocaleString('es');
-    document.getElementById('kpi-unidades').textContent = data.unidades.toLocaleString('es');
+    document.getElementById('kpi-total').textContent    = data.referencias.toLocaleString('es-VE');
+    document.getElementById('kpi-unidades').textContent = Number(data.unidades).toLocaleString('es-VE');
     document.getElementById('kpi-valor').textContent    = '$' + data.valor.toLocaleString('es', {minimumFractionDigits:2, maximumFractionDigits:2});
     document.getElementById('kpi-sinstock').textContent = data.sin_stock;
     document.getElementById('kpi-reponer').textContent  = data.por_reponer;
@@ -987,7 +954,10 @@ function renderTabla() {
           <td class="precio">${fmt(p.precio2)}</td>
           <td class="num" style="color:var(--blanco2)">${fmt(p.valor_inventario||0)}</td>
           <td>${badge(p.estado)}</td>
-          <td><button class="btn btn-ghost" style="padding:4px 10px;font-size:11px" onclick="editarProducto(${p.id})">Editar</button></td>
+          <td style="display:flex;gap:4px">
+          <button class="btn btn-ghost" style="padding:4px 10px;font-size:11px" onclick="editarProducto(${p.id})">Editar</button>
+          <button class="btn btn-ghost" style="padding:4px 10px;font-size:11px;color:var(--rojo);border-color:var(--rojo)" onclick="eliminarProducto(${p.id},'${p.codigo}')">✕</button>
+        </td>
         </tr>`).join('');
 
   document.getElementById('pag-info').textContent =
@@ -1035,7 +1005,10 @@ function renderTabla() {
           <td class="precio">${fmt(p.precio2)}</td>
           <td class="num">${fmt(p.valor_inventario||0)}</td>
           <td>${badge(p.estado)}</td>
-          <td><button class="btn btn-ghost" style="padding:4px 10px;font-size:11px" onclick="editarProducto(${p.id})">Editar</button></td>
+          <td style="display:flex;gap:4px">
+          <button class="btn btn-ghost" style="padding:4px 10px;font-size:11px" onclick="editarProducto(${p.id})">Editar</button>
+          <button class="btn btn-ghost" style="padding:4px 10px;font-size:11px;color:var(--rojo);border-color:var(--rojo)" onclick="eliminarProducto(${p.id},'${p.codigo}')">✕</button>
+        </td>
         </tr>`).join('');
 
   document.getElementById('pag-info').textContent =
@@ -1203,6 +1176,19 @@ async function registrarMovimiento() {
     document.getElementById('mov-nota').value = '';
     document.getElementById('mov-preview').style.display = 'none';
     cargarDashboard();
+  } catch(e) {}
+}
+
+// ============================================================
+// ELIMINAR PRODUCTO
+// ============================================================
+async function eliminarProducto(id, codigo) {
+  if (!confirm('¿Eliminar el producto ' + codigo + '?\nEsta acción no se puede deshacer.')) return;
+  try {
+    await apiFetch('/api/productos/' + id, { method: 'DELETE' });
+    showToast('Producto ' + codigo + ' eliminado');
+    cargarDashboard();
+    cargarInventario();
   } catch(e) {}
 }
 
