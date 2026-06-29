@@ -391,6 +391,10 @@
 
   textarea { resize: vertical; min-height: 70px; }
 
+  .precio-auto { background:#f0fdf4; border:1px solid #bbf7d0; border-radius:var(--radius); padding:10px 12px; color:var(--verde); font-size:13px; font-weight:600; width:100%; cursor:pointer; }
+  .precio-auto:hover { background:#dcfce7; }
+  .precio-note { font-size:10px; color:var(--gris); margin-top:2px; }
+
   .modal-footer {
     display: flex;
     justify-content: flex-end;
@@ -730,15 +734,19 @@
     <div class="form-row triple">
       <div class="form-group">
         <label>Costo (USD)</label>
-        <input type="number" id="p-costo" min="0" step="0.01" placeholder="0.00">
+        <input type="number" id="p-costo" min="0" step="0.01" placeholder="0.00" oninput="calcularPrecios()">
       </div>
       <div class="form-group">
-        <label>Precio Mayor (USD)</label>
-        <input type="number" id="p-precio1" min="0" step="0.01" placeholder="0.00">
+        <label>Precio Mayor (+30%)</label>
+        <div class="precio-auto" id="p-precio1-show" onclick="editarPrecio('p-precio1','p-precio1-show','Precio Mayor')">$0.00</div>
+        <div class="precio-note">Automático · clic para editar</div>
+        <input type="number" id="p-precio1" min="0" step="0.01" style="display:none">
       </div>
       <div class="form-group">
-        <label>Precio Detal (USD)</label>
-        <input type="number" id="p-precio2" min="0" step="0.01" placeholder="0.00">
+        <label>Precio Detal (+50%)</label>
+        <div class="precio-auto" id="p-precio2-show" onclick="editarPrecio('p-precio2','p-precio2-show','Precio Detal')">$0.00</div>
+        <div class="precio-note">Automático · clic para editar</div>
+        <input type="number" id="p-precio2" min="0" step="0.01" style="display:none">
       </div>
     </div>
     <div class="form-row">
@@ -1061,6 +1069,8 @@ async function abrirModalProducto(id = null) {
     document.getElementById('p-costo').value     = p.costo;
     document.getElementById('p-precio1').value   = p.precio1;
     document.getElementById('p-precio2').value   = p.precio2;
+    document.getElementById('p-precio1-show').textContent = fmt(p.precio1);
+    document.getElementById('p-precio2-show').textContent = fmt(p.precio2);
     document.getElementById('p-cantidad').value  = p.cantidad;
     document.getElementById('p-stock-min').value = p.stock_min;
   } else {
