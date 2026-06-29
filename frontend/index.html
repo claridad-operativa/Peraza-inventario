@@ -522,17 +522,55 @@
     .table-toolbar { flex-direction: column; }
     .search-box { width: 100%; }
   }
+
+/* LOGIN */
+.login-bg { position:fixed; inset:0; background:#f5f5f5; display:flex; align-items:center; justify-content:center; z-index:999; }
+.login-box { background:#fff; border:1px solid var(--gris3); border-top:4px solid var(--rojo); border-radius:8px; padding:40px; width:100%; max-width:380px; box-shadow:0 4px 24px rgba(0,0,0,0.08); }
+.login-logo { font-family:'Barlow Condensed',sans-serif; font-size:24px; font-weight:700; color:#1a1a1a; text-align:center; margin-bottom:6px; }
+.login-logo span { color:var(--rojo); }
+.login-sub { text-align:center; font-size:12px; color:var(--gris); margin-bottom:28px; }
+.login-input { width:100%; background:#f5f5f5; border:1px solid var(--gris3); border-radius:6px; padding:10px 12px; color:#1a1a1a; font-size:14px; font-family:'Inter',sans-serif; margin-bottom:14px; }
+.login-input:focus { outline:none; border-color:var(--rojo); }
+.login-btn { width:100%; background:var(--rojo); color:#fff; border:none; border-radius:6px; padding:12px; font-size:14px; font-weight:600; cursor:pointer; font-family:'Inter',sans-serif; }
+.login-btn:hover { background:var(--rojo2); }
+.login-error { background:#fee2e2; color:#991b1b; border-radius:6px; padding:10px 14px; font-size:13px; margin-bottom:14px; display:none; text-align:center; }
+.btn-logout { background:transparent; border:1px solid var(--gris3); border-radius:6px; padding:6px 12px; font-size:12px; color:var(--gris); cursor:pointer; font-family:'Inter',sans-serif; }
+.btn-logout:hover { border-color:var(--rojo); color:var(--rojo); }
 </style>
 </head>
 <body>
+
+<!-- LOGIN -->
+<div class="login-bg" id="login-screen">
+  <div class="login-box">
+    <div class="login-logo">RODAMIENTOS <span>PERAZA</span></div>
+    <div class="login-sub">Sistema de Control de Inventario</div>
+    <div class="login-error" id="login-error">Usuario o contraseña incorrectos</div>
+    <div style="margin-bottom:14px">
+      <label style="font-size:11px;color:var(--gris);text-transform:uppercase;letter-spacing:.6px;font-weight:600;display:block;margin-bottom:6px">Usuario</label>
+      <input class="login-input" type="text" id="login-user" placeholder="Ingresa tu usuario">
+    </div>
+    <div style="margin-bottom:14px">
+      <label style="font-size:11px;color:var(--gris);text-transform:uppercase;letter-spacing:.6px;font-weight:600;display:block;margin-bottom:6px">Contraseña</label>
+      <input class="login-input" type="password" id="login-pass" placeholder="Ingresa tu contraseña">
+    </div>
+    <button class="login-btn" onclick="doLogin()">Entrar</button>
+  </div>
+</div>
+
+<!-- APP -->
+<div id="app" style="display:none">
 
 <header>
   <div class="logo">
     <div class="logo-text">RODAMIENTOS <span>PERAZA</span></div>
   </div>
-  <div class="header-info">
+  <div style="display:flex;align-items:center;gap:16px">
+    <div class="header-info">
     <div id="fecha-hoy"></div>
     <div>Sistema de Inventario</div>
+  </div>
+    <button class="btn-logout" onclick="doLogout()">Cerrar sesión</button>
   </div>
 </header>
 
@@ -704,13 +742,13 @@
         <input type="number" id="p-costo" min="0" step="0.01" placeholder="0.00" oninput="calcularPrecios()">
       </div>
       <div class="form-group">
-        <label>Precio Mayor (+30%)</label>
+        <label>Precio Mayor (+30% sobre costo)</label>
         <div class="precio-auto" id="p-precio1-show" onclick="editarPrecio('p-precio1','p-precio1-show','Precio Mayor')">$0.00</div>
         <div class="precio-note">Automático · clic para editar</div>
         <input type="number" id="p-precio1" min="0" step="0.01" style="display:none">
       </div>
       <div class="form-group">
-        <label>Precio Detal (+50%)</label>
+        <label>Precio Detal (+50% sobre costo)</label>
         <div class="precio-auto" id="p-precio2-show" onclick="editarPrecio('p-precio2','p-precio2-show','Precio Detal')">$0.00</div>
         <div class="precio-note">Automático · clic para editar</div>
         <input type="number" id="p-precio2" min="0" step="0.01" style="display:none">
@@ -761,6 +799,49 @@
 
 
 <script>
+
+// ============================================================
+// CREDENCIALES
+// ============================================================
+const USUARIOS = { 'peraza': 'rodamientos2026' };
+
+// ============================================================
+// LOGIN
+// ============================================================
+function doLogin() {
+  const user = document.getElementById('login-user').value.trim().toLowerCase();
+  const pass = document.getElementById('login-pass').value;
+  const err  = document.getElementById('login-error');
+  if (USUARIOS[user] && USUARIOS[user] === pass) {
+    sessionStorage.setItem('rp_logueado', '1');
+    document.getElementById('login-screen').style.display = 'none';
+    document.getElementById('app').style.display = 'block';
+    err.style.display = 'none';
+    iniciarApp();
+  } else {
+    err.style.display = 'block';
+    document.getElementById('login-pass').value = '';
+  }
+}
+
+function doLogout() {
+  sessionStorage.removeItem('rp_logueado');
+  document.getElementById('login-screen').style.display = 'flex';
+  document.getElementById('app').style.display = 'none';
+}
+
+function iniciarApp() {
+  document.getElementById('fecha-hoy').textContent = fechaHoy();
+  cargarDashboard();
+  cargarInventario();
+}
+
+// Auto-login si ya estaba logueado
+if (sessionStorage.getItem('rp_logueado')) {
+  document.getElementById('login-screen').style.display = 'none';
+  document.getElementById('app').style.display = 'block';
+}
+
 // ============================================================
 // CONFIGURACIÓN API
 // Auto-detecta si corre local o en producción (Railway)
@@ -816,11 +897,6 @@ function badge(est) {
   return '<span class="badge badge-activo">Activo</span>';
 }
 
-function calcularPrecios(){var co=parseFloat(document.getElementById('p-costo').value)||0;var p1=Math.round(co*1.30*100)/100;var p2=Math.round(co*1.50*100)/100;var s1=document.getElementById('p-precio1-show');var s2=document.getElementById('p-precio2-show');if(s1)s1.textContent=fmt(p1);if(s2)s2.textContent=fmt(p2);var i1=document.getElementById('p-precio1');var i2=document.getElementById('p-precio2');if(i1)i1.value=p1.toFixed(2);if(i2)i2.value=p2.toFixed(2);}
-function calcularPrecios(){var co=parseFloat(document.getElementById('p-costo').value)||0;var p1=Math.round(co*1.30*100)/100;var p2=Math.round(co*1.50*100)/100;var s1=document.getElementById('p-precio1-show');var s2=document.getElementById('p-precio2-show');if(s1)s1.textContent=fmt(p1);if(s2)s2.textContent=fmt(p2);var i1=document.getElementById('p-precio1');var i2=document.getElementById('p-precio2');if(i1)i1.value=p1.toFixed(2);if(i2)i2.value=p2.toFixed(2);}
-function calcularPrecios(){var co=parseFloat(document.getElementById('p-costo').value)||0;var p1=Math.round(co*1.30*100)/100;var p2=Math.round(co*1.50*100)/100;var s1=document.getElementById('p-precio1-show');var s2=document.getElementById('p-precio2-show');if(s1)s1.textContent=fmt(p1);if(s2)s2.textContent=fmt(p2);var i1=document.getElementById('p-precio1');var i2=document.getElementById('p-precio2');if(i1)i1.value=p1.toFixed(2);if(i2)i2.value=p2.toFixed(2);}
-function calcularPrecios(){var co=parseFloat(document.getElementById('p-costo').value)||0;var p1=Math.round(co*1.30*100)/100;var p2=Math.round(co*1.50*100)/100;var s1=document.getElementById('p-precio1-show');var s2=document.getElementById('p-precio2-show');if(s1)s1.textContent=fmt(p1);if(s2)s2.textContent=fmt(p2);var i1=document.getElementById('p-precio1');var i2=document.getElementById('p-precio2');if(i1)i1.value=p1.toFixed(2);if(i2)i2.value=p2.toFixed(2);}
-function calcularPrecios(){var co=parseFloat(document.getElementById('p-costo').value)||0;var p1=Math.round(co*1.30*100)/100;var p2=Math.round(co*1.50*100)/100;var s1=document.getElementById('p-precio1-show');var s2=document.getElementById('p-precio2-show');if(s1)s1.textContent=fmt(p1);if(s2)s2.textContent=fmt(p2);var i1=document.getElementById('p-precio1');var i2=document.getElementById('p-precio2');if(i1)i1.value=p1.toFixed(2);if(i2)i2.value=p2.toFixed(2);}
 function fmt(n) { return '$' + (Number(n)||0).toLocaleString('es-VE', {minimumFractionDigits:2, maximumFractionDigits:2}); }
 
 function showToast(msg, tipo='ok') {
@@ -1289,9 +1365,8 @@ async function generarRespaldoManual() {
 // ============================================================
 // INIT
 // ============================================================
-document.getElementById('fecha-hoy').textContent = fechaHoy();
-cargarDashboard();
-cargarInventario();
+if (sessionStorage.getItem('rp_logueado')) { iniciarApp(); }
 </script>
+</div>
 </body>
 </html>
