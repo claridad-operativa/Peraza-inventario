@@ -1,6 +1,15 @@
 """
 Rodamientos Peraza — Sistema de Inventario
-Backend: FastAPI + SQLite + Respaldos automáticos diarios
+Backend: FastAPI + SQLite (sobre Volume de Railway) + Respaldos consistentes + Autenticacion
+
+Variables de entorno que usa (ver pasos de despliegue):
+  DATA_DIR       Carpeta persistente donde vive la base y los respaldos (ej: /data). Si no se define, usa la carpeta de la app (solo para pruebas locales).
+  SECRET_KEY     Clave para firmar los tokens de sesion. OBLIGATORIA en produccion.
+  APP_USER       Usuario de acceso. OBLIGATORIO en produccion.
+  APP_PASSWORD   Contraseña de acceso. OBLIGATORIO en produccion.
+  TOKEN_HORAS    Horas de validez de la sesion (por defecto 12).
+  CORS_ORIGINS   Dominios externos permitidos, separados por coma. Vacio = solo mismo dominio (lo normal aqui).
+  TZ             Zona horaria del servidor. Definir TZ=America/Caracas para que las fechas queden en hora de Venezuela.
 """
 
 import sqlite3
@@ -9,32 +18,123 @@ import schedule
 import threading
 import time
 import os
+import re
+import hmac
+import hashlib
+import base64
+import json
 from datetime import datetime
 from pathlib import Path
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, Literal
 
 # ============================================================
-# CONFIGURACIÓN
+# CONFIGURACION
 # ============================================================
-BASE_DIR   = Path(__file__).parent
-DB_PATH    = BASE_DIR / "inventario.db"
-BACKUP_DIR = BASE_DIR / "backups"
-BACKUP_DIR.mkdir(exist_ok=True)
+BASE_DIR = Path(__file__).parent
+
+# La base y los respaldos viven en DATA_DIR (el Volume de Railway).
+# Orden de preferencia:
+#   1) DATA_DIR (si lo defines tu)
+#   2) RAILWAY_VOLUME_MOUNT_PATH (lo pone Railway solo al montar un volumen)
+#   3) la carpeta de la app (solo para pruebas locales)
+DATA_DIR = Path(
+    os.getenv("DATA_DIR")
+    or os.getenv("RAILWAY_VOLUME_MOUNT_PATH")
+    or str(BASE_DIR)
+)
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+DB_PATH    = DATA_DIR / "inventario.db"
+BACKUP_DIR = DATA_DIR / "backups"
+BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+
+# Snapshot inicial incluido en la imagen (commiteado en git). Solo se usa
+# para sembrar el volumen la PRIMERA vez que esta vacio.
+SEED_DB = BASE_DIR / "inventario.db"
+
+# --- Autenticacion ---
+SECRET_KEY   = os.getenv("SECRET_KEY", "")
+APP_USER     = os.getenv("APP_USER", "")
+APP_PASSWORD = os.getenv("APP_PASSWORD", "")
+TOKEN_HORAS  = int(os.getenv("TOKEN_HORAS", "12"))
+AUTH_LISTA   = bool(SECRET_KEY and APP_USER and APP_PASSWORD)
+
+# --- CORS ---
+_cors = [o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
 
 app = FastAPI(title="Rodamientos Peraza — Inventario API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_cors,        # vacio = solo mismo dominio (no se necesita CORS en el setup normal)
+    allow_credentials=False,    # usamos tokens Bearer, no cookies
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ============================================================
+# AUTENTICACION (token firmado con HMAC, sin dependencias extra)
+# ============================================================
+def _b64e(b: bytes) -> str:
+    return base64.urlsafe_b64encode(b).decode().rstrip("=")
+
+def _b64d(s: str) -> bytes:
+    return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+
+def crear_token(user: str) -> str:
+    payload = {"user": user, "exp": int(time.time()) + TOKEN_HORAS * 3600}
+    body = _b64e(json.dumps(payload, separators=(",", ":")).encode())
+    sig = _b64e(hmac.new(SECRET_KEY.encode(), body.encode(), hashlib.sha256).digest())
+    return f"{body}.{sig}"
+
+def verificar_token(token: str):
+    try:
+        body, sig = token.split(".", 1)
+        esperado = _b64e(hmac.new(SECRET_KEY.encode(), body.encode(), hashlib.sha256).digest())
+        if not hmac.compare_digest(sig, esperado):
+            return None
+        payload = json.loads(_b64d(body))
+        if int(payload.get("exp", 0)) < int(time.time()):
+            return None
+        return payload.get("user")
+    except Exception:
+        return None
+
+def requiere_auth(authorization: str = Header(default="")):
+    """Protege los endpoints de datos. Falla CERRADO si no hay auth configurada."""
+    if not AUTH_LISTA:
+        raise HTTPException(
+            status_code=503,
+            detail="Autenticacion no configurada. Defina SECRET_KEY, APP_USER y APP_PASSWORD en el servidor."
+        )
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="No autorizado")
+    user = verificar_token(authorization[7:])
+    if not user:
+        raise HTTPException(status_code=401, detail="Sesion invalida o expirada")
+    return user
+
+class Login(BaseModel):
+    usuario:  str
+    password: str
+
+@app.post("/api/login")
+def login(c: Login):
+    if not AUTH_LISTA:
+        raise HTTPException(
+            status_code=503,
+            detail="Autenticacion no configurada. Defina SECRET_KEY, APP_USER y APP_PASSWORD en el servidor."
+        )
+    ok_user = hmac.compare_digest(c.usuario.strip().lower(), APP_USER.strip().lower())
+    ok_pass = hmac.compare_digest(c.password, APP_PASSWORD)
+    if not (ok_user and ok_pass):
+        raise HTTPException(status_code=401, detail="Usuario o contraseña incorrectos")
+    return {"token": crear_token(APP_USER), "expira_horas": TOKEN_HORAS}
 
 # ============================================================
 # BASE DE DATOS
@@ -44,6 +144,31 @@ def get_db():
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
+
+def _contar_productos(path: Path) -> int:
+    """Cuantos productos hay en una base. -1 si la tabla no existe / no se puede leer."""
+    try:
+        c = sqlite3.connect(path)
+        n = c.execute("SELECT COUNT(*) FROM productos").fetchone()[0]
+        c.close()
+        return int(n)
+    except Exception:
+        return -1
+
+def sembrar_si_necesario():
+    """
+    Copia el snapshot incluido en la imagen al volumen SOLO si el volumen
+    todavia no tiene datos. Nunca sobreescribe una base con productos.
+    """
+    if SEED_DB.resolve() == DB_PATH.resolve():
+        return  # pruebas locales: misma carpeta, no hay nada que sembrar
+    if not SEED_DB.exists():
+        return
+    necesita = (not DB_PATH.exists()) or (_contar_productos(DB_PATH) <= 0)
+    semilla_tiene_datos = _contar_productos(SEED_DB) > 0
+    if necesita and semilla_tiene_datos:
+        shutil.copy2(SEED_DB, DB_PATH)
+        print(f"📦 Base sembrada desde la imagen al volumen ({_contar_productos(DB_PATH)} productos)")
 
 def init_db():
     conn = get_db()
@@ -97,20 +222,20 @@ def init_db():
 # MODELOS
 # ============================================================
 class Producto(BaseModel):
-    codigo:    str
+    codigo:     str
     referencia: Optional[str] = ""
-    categoria: str
-    marca:     str
-    cantidad:  float = 0
-    costo:     float = 0
-    precio1:   float = 0
-    precio2:   float = 0
-    stock_min: int = 1
-    proveedor: Optional[str] = ""
+    categoria:  str
+    marca:      str
+    cantidad:   float = 0
+    costo:      float = 0
+    precio1:    float = 0
+    precio2:    float = 0
+    stock_min:  int = 1
+    proveedor:  Optional[str] = ""
 
 class Movimiento(BaseModel):
     producto_id: int
-    tipo:        str
+    tipo:        Literal["entrada", "salida"]
     cantidad:    float
     nota:        Optional[str] = ""
 
@@ -118,20 +243,26 @@ class MovimientoCodigo(BaseModel):
     codigo:    str
     categoria: Optional[str] = ""
     marca:     Optional[str] = ""
-    tipo:      str
+    tipo:      Literal["entrada", "salida"]
     cantidad:  float
     nota:      Optional[str] = ""
 
 # ============================================================
-# RESPALDO AUTOMÁTICO
+# RESPALDO (consistente, seguro para WAL)
 # ============================================================
 def hacer_respaldo():
     fecha = datetime.now().strftime("%Y-%m-%d")
     archivo = BACKUP_DIR / f"respaldo_{fecha}.db"
     try:
-        shutil.copy2(DB_PATH, archivo)
+        # API de respaldo online de SQLite: consistente aun con WAL activo.
+        src = sqlite3.connect(DB_PATH)
+        dst = sqlite3.connect(archivo)
+        with dst:
+            src.backup(dst)
+        dst.close()
+        src.close()
         tamanio = archivo.stat().st_size
-        # Registrar en BD
+
         conn = get_db()
         conn.execute(
             "INSERT INTO respaldos (archivo, tamanio) VALUES (?, ?)",
@@ -139,7 +270,7 @@ def hacer_respaldo():
         )
         conn.commit()
         conn.close()
-        # Limpiar respaldos de más de 30 días
+
         limpiar_respaldos_antiguos()
         print(f"✅ Respaldo creado: {archivo.name} ({tamanio/1024:.1f} KB)")
     except Exception as e:
@@ -160,13 +291,14 @@ def iniciar_scheduler():
             time.sleep(60)
     hilo = threading.Thread(target=run, daemon=True)
     hilo.start()
-    print("⏰ Scheduler de respaldos iniciado (diario a medianoche)")
+    print("⏰ Scheduler de respaldos iniciado (diario a medianoche, hora del servidor)")
 
 # ============================================================
 # RUTAS — PRODUCTOS
 # ============================================================
 @app.get("/api/productos")
-def listar_productos(categoria: str = "", estado: str = "", buscar: str = ""):
+def listar_productos(categoria: str = "", estado: str = "", buscar: str = "",
+                     _: str = Depends(requiere_auth)):
     conn = get_db()
     query = "SELECT * FROM productos WHERE activo = 1"
     params = []
@@ -182,26 +314,23 @@ def listar_productos(categoria: str = "", estado: str = "", buscar: str = ""):
 
     productos = [dict(r) for r in rows]
 
-    # Filtrar por estado en Python
+    def get_estado(p):
+        if p["cantidad"] == 0:                 return "Sin Stock"
+        if p["cantidad"] <= p["stock_min"]:    return "Por Reponer"
+        return "Activo"
+
     if estado:
-        def get_estado(p):
-            if p["cantidad"] == 0: return "Sin Stock"
-            if p["cantidad"] <= p["stock_min"]: return "Por Reponer"
-            return "Activo"
         productos = [p for p in productos if get_estado(p) == estado]
 
-    # Agregar estado calculado
     for p in productos:
-        if p["cantidad"] == 0:       p["estado"] = "Sin Stock"
-        elif p["cantidad"] <= p["stock_min"]: p["estado"] = "Por Reponer"
-        else:                         p["estado"] = "Activo"
+        p["estado"] = get_estado(p)
         p["valor_inventario"] = round(p["costo"] * p["cantidad"], 2)
         p["margen"] = round((p["precio1"] - p["costo"]) / p["precio1"], 4) if p["precio1"] > 0 else 0
 
     return productos
 
 @app.get("/api/productos/{producto_id}")
-def obtener_producto(producto_id: int):
+def obtener_producto(producto_id: int, _: str = Depends(requiere_auth)):
     conn = get_db()
     row = conn.execute("SELECT * FROM productos WHERE id = ?", (producto_id,)).fetchone()
     conn.close()
@@ -210,7 +339,7 @@ def obtener_producto(producto_id: int):
     return dict(row)
 
 @app.post("/api/productos")
-def crear_producto(p: Producto):
+def crear_producto(p: Producto, _: str = Depends(requiere_auth)):
     conn = get_db()
     try:
         cursor = conn.execute("""
@@ -232,16 +361,22 @@ def crear_producto(p: Producto):
         raise HTTPException(status_code=400, detail="Ya existe un producto con ese codigo, categoria y marca")
 
 @app.put("/api/productos/{producto_id}")
-def actualizar_producto(producto_id: int, p: Producto):
+def actualizar_producto(producto_id: int, p: Producto, _: str = Depends(requiere_auth)):
     conn = get_db()
     prod_actual = conn.execute("SELECT cantidad FROM productos WHERE id=?", (producto_id,)).fetchone()
-    cant_antes = prod_actual["cantidad"] if prod_actual else 0
+    if not prod_actual:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Producto no encontrado")
+    cant_antes = prod_actual["cantidad"]
+
+    # IMPORTANTE: ahora 'cantidad' SI se actualiza (antes no, y el inventario quedaba desincronizado).
     conn.execute("""
         UPDATE productos SET codigo=?, referencia=?, categoria=?, marca=?,
-               costo=?, precio1=?, precio2=?, stock_min=?, proveedor=?, fecha_act=date('now')
+               cantidad=?, costo=?, precio1=?, precio2=?, stock_min=?, proveedor=?, fecha_act=date('now')
         WHERE id=?
     """, (p.codigo, p.referencia, p.categoria, p.marca,
-          p.costo, p.precio1, p.precio2, p.stock_min, p.proveedor, producto_id))
+          p.cantidad, p.costo, p.precio1, p.precio2, p.stock_min, p.proveedor, producto_id))
+
     if p.cantidad != cant_antes:
         tipo = 'entrada' if p.cantidad > cant_antes else 'salida'
         diff = abs(p.cantidad - cant_antes)
@@ -259,7 +394,7 @@ def actualizar_producto(producto_id: int, p: Producto):
     return {"ok": True, "mensaje": "Producto actualizado"}
 
 @app.delete("/api/productos/{producto_id}")
-def eliminar_producto(producto_id: int):
+def eliminar_producto(producto_id: int, _: str = Depends(requiere_auth)):
     conn = get_db()
     prod = conn.execute("SELECT cantidad FROM productos WHERE id=?", (producto_id,)).fetchone()
     cant = prod["cantidad"] if prod else 0
@@ -273,7 +408,7 @@ def eliminar_producto(producto_id: int):
     return {"ok": True, "mensaje": "Producto eliminado"}
 
 @app.get("/api/categorias")
-def listar_categorias():
+def listar_categorias(_: str = Depends(requiere_auth)):
     conn = get_db()
     rows = conn.execute(
         "SELECT DISTINCT categoria FROM productos WHERE activo=1 ORDER BY categoria"
@@ -282,7 +417,7 @@ def listar_categorias():
     return [r["categoria"] for r in rows]
 
 @app.get("/api/marcas")
-def listar_marcas():
+def listar_marcas(_: str = Depends(requiere_auth)):
     conn = get_db()
     rows = conn.execute(
         "SELECT DISTINCT marca FROM productos WHERE activo=1 ORDER BY marca"
@@ -293,39 +428,41 @@ def listar_marcas():
 # ============================================================
 # RUTAS — MOVIMIENTOS
 # ============================================================
-@app.post("/api/movimientos")
-def registrar_movimiento(m: Movimiento):
+def _aplicar_movimiento(producto_id: int, tipo: str, cantidad: float, nota: str):
     conn = get_db()
     prod = conn.execute(
-        "SELECT * FROM productos WHERE id = ? AND activo = 1", (m.producto_id,)
+        "SELECT * FROM productos WHERE id = ? AND activo = 1", (producto_id,)
     ).fetchone()
     if not prod:
         conn.close()
         raise HTTPException(status_code=404, detail="Producto no encontrado")
 
     stock_antes = prod["cantidad"]
-    if m.tipo == "salida" and m.cantidad > stock_antes:
+    if tipo == "salida" and cantidad > stock_antes:
         conn.close()
         raise HTTPException(status_code=400,
             detail=f"Stock insuficiente. Disponible: {stock_antes} unidades")
 
-    stock_desp = stock_antes + m.cantidad if m.tipo == "entrada" else stock_antes - m.cantidad
+    stock_desp = stock_antes + cantidad if tipo == "entrada" else stock_antes - cantidad
 
     conn.execute("""
         INSERT INTO movimientos (producto_id, tipo, cantidad, stock_antes, stock_desp, nota)
         VALUES (?, ?, ?, ?, ?, ?)
-    """, (m.producto_id, m.tipo, m.cantidad, stock_antes, stock_desp, m.nota))
-
+    """, (producto_id, tipo, cantidad, stock_antes, stock_desp, nota))
     conn.execute(
         "UPDATE productos SET cantidad = ?, fecha_act = date('now') WHERE id = ?",
-        (stock_desp, m.producto_id)
+        (stock_desp, producto_id)
     )
     conn.commit()
     conn.close()
     return {"ok": True, "stock_anterior": stock_antes, "stock_nuevo": stock_desp}
 
+@app.post("/api/movimientos")
+def registrar_movimiento(m: Movimiento, _: str = Depends(requiere_auth)):
+    return _aplicar_movimiento(m.producto_id, m.tipo, m.cantidad, m.nota)
+
 @app.post("/api/movimientos/por-codigo")
-def registrar_movimiento_codigo(m: MovimientoCodigo):
+def registrar_movimiento_codigo(m: MovimientoCodigo, _: str = Depends(requiere_auth)):
     conn = get_db()
     query = "SELECT * FROM productos WHERE codigo = ? AND activo = 1"
     params = [m.codigo]
@@ -339,11 +476,11 @@ def registrar_movimiento_codigo(m: MovimientoCodigo):
     conn.close()
     if not prod:
         raise HTTPException(status_code=404, detail="Producto no encontrado")
-    mov = Movimiento(producto_id=prod["id"], tipo=m.tipo, cantidad=m.cantidad, nota=m.nota)
-    return registrar_movimiento(mov)
+    return _aplicar_movimiento(prod["id"], m.tipo, m.cantidad, m.nota)
 
 @app.get("/api/movimientos")
-def listar_movimientos(limite: int = 100, producto_id: int = 0):
+def listar_movimientos(limite: int = 100, producto_id: int = 0,
+                       _: str = Depends(requiere_auth)):
     conn = get_db()
     if producto_id:
         rows = conn.execute("""
@@ -365,7 +502,7 @@ def listar_movimientos(limite: int = 100, producto_id: int = 0):
 # RUTAS — DASHBOARD
 # ============================================================
 @app.get("/api/dashboard")
-def dashboard():
+def dashboard(_: str = Depends(requiere_auth)):
     conn = get_db()
 
     totales = conn.execute("""
@@ -416,8 +553,10 @@ def dashboard():
 # ============================================================
 # RUTAS — RESPALDOS
 # ============================================================
+SAFE_BACKUP = re.compile(r"^respaldo_\d{4}-\d{2}-\d{2}\.db$")
+
 @app.get("/api/respaldos")
-def listar_respaldos():
+def listar_respaldos(_: str = Depends(requiere_auth)):
     archivos = sorted(BACKUP_DIR.glob("respaldo_*.db"), reverse=True)
     resultado = []
     for f in archivos[:30]:
@@ -429,37 +568,49 @@ def listar_respaldos():
     return resultado
 
 @app.post("/api/respaldos/generar")
-def generar_respaldo_manual():
+def generar_respaldo_manual(_: str = Depends(requiere_auth)):
     hacer_respaldo()
     return {"ok": True, "mensaje": "Respaldo generado exitosamente"}
 
 @app.get("/api/respaldos/descargar/{archivo}")
-def descargar_respaldo(archivo: str):
-    ruta = BACKUP_DIR / archivo
-    if not ruta.exists():
+def descargar_respaldo(archivo: str, _: str = Depends(requiere_auth)):
+    # Solo se permite el patron exacto de nombre de respaldo (evita path traversal).
+    if not SAFE_BACKUP.match(archivo):
+        raise HTTPException(status_code=400, detail="Nombre de respaldo invalido")
+    ruta = (BACKUP_DIR / archivo).resolve()
+    if BACKUP_DIR.resolve() not in ruta.parents or not ruta.exists():
         raise HTTPException(status_code=404, detail="Respaldo no encontrado")
     return FileResponse(ruta, filename=archivo, media_type="application/octet-stream")
+
+# ============================================================
+# STATUS (abierto, para diagnostico y healthcheck)
+# ============================================================
+@app.get("/api/status")
+def status():
+    return {
+        "ok": True,
+        "sistema": "Rodamientos Peraza — Inventario",
+        "version": "1.1",
+        "auth_configurada": AUTH_LISTA,
+        "usando_volumen": str(DATA_DIR) != str(BASE_DIR),
+        "data_dir": str(DATA_DIR),
+        "fecha": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
 
 # ============================================================
 # STARTUP
 # ============================================================
 @app.on_event("startup")
 async def startup():
-    init_db()
-    hacer_respaldo()       # Respaldo al arrancar
-    iniciar_scheduler()    # Scheduler diario
+    sembrar_si_necesario()   # Copia el snapshot al volumen si esta vacio
+    init_db()                # Crea tablas/indices si faltan
+    hacer_respaldo()         # Respaldo al arrancar
+    iniciar_scheduler()      # Scheduler diario
+    if not AUTH_LISTA:
+        print("⚠️  ATENCION: autenticacion NO configurada. La API rechazara las peticiones (503) hasta definir SECRET_KEY, APP_USER y APP_PASSWORD.")
     print("🚀 Servidor Rodamientos Peraza iniciado")
 
-@app.get("/api/status")
-def status():
-    return {
-        "ok": True,
-        "sistema": "Rodamientos Peraza — Inventario",
-        "version": "1.0",
-        "fecha": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    }
-
-# Servir el frontend (debe ir al final)
+# Servir el frontend (debe ir al final, despues de las rutas /api)
 FRONTEND_DIR = BASE_DIR / "frontend"
 if FRONTEND_DIR.exists():
     app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")

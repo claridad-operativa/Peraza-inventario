@@ -575,11 +575,11 @@
 </header>
 
 <nav>
-  <div class="tab active" onclick="showTab('dashboard')">Dashboard</div>
-  <div class="tab" onclick="showTab('inventario')">Inventario</div>
-  <div class="tab" onclick="showTab('historial')">Historial</div>
-  <div class="tab" onclick="showTab('categorias')">Por Categoría</div>
-  <div class="tab" onclick="showTab('respaldos')">💾 Respaldos</div>
+  <div class="tab active" onclick="showTab('dashboard', this)">Dashboard</div>
+  <div class="tab" onclick="showTab('inventario', this)">Inventario</div>
+  <div class="tab" onclick="showTab('historial', this)">Historial</div>
+  <div class="tab" onclick="showTab('categorias', this)">Por Categoría</div>
+  <div class="tab" onclick="showTab('respaldos', this)">💾 Respaldos</div>
 </nav>
 
 <main>
@@ -621,7 +621,7 @@
   <div class="section" id="sec-inventario">
     <div class="table-wrap">
       <div class="table-toolbar">
-        <input class="search-box" type="text" id="buscar" placeholder="Buscar por código, referencia o marca..." oninput="paginaActual=1;cargarInventario()">
+        <input class="search-box" type="text" id="buscar" placeholder="Buscar por código, referencia o marca..." oninput="buscarDebounce()">
         <select class="filter" id="filtro-cat" onchange="paginaActual=1;cargarInventario()">
           <option value="">Todas las categorías</option>
         </select>
@@ -786,43 +786,60 @@
 <script>
 
 // ============================================================
-// CREDENCIALES
+// AUTENTICACION (token real validado por el servidor)
 // ============================================================
-const USUARIOS = { 'peraza': 'rodamientos2026' };
+function getToken() { return sessionStorage.getItem('rp_token') || ''; }
 
-// ============================================================
-// LOGIN
-// ============================================================
-function doLogin() {
-  const user = document.getElementById('login-user').value.trim().toLowerCase();
+async function doLogin() {
+  const user = document.getElementById('login-user').value.trim();
   const pass = document.getElementById('login-pass').value;
   const err  = document.getElementById('login-error');
-  if (USUARIOS[user] && USUARIOS[user] === pass) {
-    sessionStorage.setItem('rp_logueado', '1');
+  try {
+    const res = await fetch(API + '/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ usuario: user, password: pass })
+    });
+    if (!res.ok) {
+      const e = await res.json().catch(() => ({}));
+      err.textContent = (typeof e.detail === 'string' ? e.detail : '') || 'Usuario o contraseña incorrectos';
+      err.style.display = 'block';
+      document.getElementById('login-pass').value = '';
+      return;
+    }
+    const data = await res.json();
+    sessionStorage.setItem('rp_token', data.token);
+    err.style.display = 'none';
     document.getElementById('login-screen').style.display = 'none';
     document.getElementById('app').style.display = 'block';
-    err.style.display = 'none';
     iniciarApp();
-  } else {
+  } catch (e) {
+    err.textContent = 'No se pudo conectar con el servidor';
     err.style.display = 'block';
-    document.getElementById('login-pass').value = '';
   }
 }
 
 function doLogout() {
-  sessionStorage.removeItem('rp_logueado');
+  sessionStorage.removeItem('rp_token');
   document.getElementById('login-screen').style.display = 'flex';
   document.getElementById('app').style.display = 'none';
 }
 
 function iniciarApp() {
   document.getElementById('fecha-hoy').textContent = fechaHoy();
+  cargarFiltros();      // categorias y marcas: una sola vez
   cargarDashboard();
   cargarInventario();
 }
 
-// Auto-login si ya estaba logueado
-if (sessionStorage.getItem('rp_logueado')) {
+// Entrar con Enter desde la contraseña
+(function(){
+  const _lp = document.getElementById('login-pass');
+  if (_lp) _lp.addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
+})();
+
+// Auto-entrar si ya hay sesion guardada (el token se valida en la primera llamada)
+if (sessionStorage.getItem('rp_token')) {
   document.getElementById('login-screen').style.display = 'none';
   document.getElementById('app').style.display = 'block';
 }
@@ -838,12 +855,22 @@ const API = window.location.hostname === 'localhost' || window.location.hostname
 async function apiFetch(path, opts = {}) {
   try {
     const res = await fetch(API + path, {
-      headers: { 'Content-Type': 'application/json' },
-      ...opts
+      ...opts,
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + getToken(),
+        ...(opts.headers || {})
+      }
     });
+    if (res.status === 401) {
+      sessionStorage.removeItem('rp_token');
+      doLogout();
+      throw new Error('Sesión expirada. Inicia sesión de nuevo.');
+    }
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: 'Error del servidor' }));
-      throw new Error(err.detail || 'Error desconocido');
+      const msg = typeof err.detail === 'string' ? err.detail : 'Error del servidor';
+      throw new Error(msg || 'Error desconocido');
     }
     return await res.json();
   } catch (e) {
@@ -884,6 +911,22 @@ function badge(est) {
 
 function fmt(n) { return '$' + (Number(n)||0).toLocaleString('es-VE', {minimumFractionDigits:2, maximumFractionDigits:2}); }
 
+// Muestra la fecha tal como la guardo el servidor (hora de Venezuela), sin que el
+// navegador la reinterprete por su zona horaria. Entra "YYYY-MM-DD HH:MM:SS".
+function fmtFecha(s) {
+  if (!s) return '—';
+  const m = String(s).match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/);
+  if (!m) return s;
+  return `${m[3]}/${m[2]}/${m[1].slice(2)} ${m[4]}:${m[5]}`;
+}
+
+// Evita llamar a la API en cada tecla del buscador.
+let _buscarTimer = null;
+function buscarDebounce() {
+  clearTimeout(_buscarTimer);
+  _buscarTimer = setTimeout(() => { paginaActual = 1; cargarInventario(); }, 300);
+}
+
 function showToast(msg, tipo='ok') {
   const t = document.getElementById('toast');
   t.textContent = msg;
@@ -903,10 +946,10 @@ function showLoading(id, cols) {
 // ============================================================
 // TABS
 // ============================================================
-function showTab(id) {
+function showTab(id, el) {
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
-  event.target.classList.add('active');
+  if (el) el.classList.add('active');
   document.getElementById('sec-' + id).classList.add('active');
   if (id === 'dashboard')   cargarDashboard();
   if (id === 'inventario')  { paginaActual = 1; cargarInventario(); }
@@ -921,24 +964,11 @@ function showTab(id) {
 async function cargarDashboard() {
   try {
     const data = await apiFetch('/api/dashboard');
-    document.getElementById('kpi-total').textContent    = data.referencias.toLocaleString('es-VE');
+    document.getElementById('kpi-total').textContent    = Number(data.referencias).toLocaleString('es-VE');
     document.getElementById('kpi-unidades').textContent = Number(data.unidades).toLocaleString('es-VE');
-    document.getElementById('kpi-valor').textContent    = '$' + data.valor.toLocaleString('es', {minimumFractionDigits:2, maximumFractionDigits:2});
+    document.getElementById('kpi-valor').textContent    = fmt(data.valor);
     document.getElementById('kpi-sinstock').textContent = data.sin_stock;
     document.getElementById('kpi-reponer').textContent  = data.por_reponer;
-
-    const tbody = document.getElementById('tabla-alertas');
-    tbody.innerHTML = data.alertas.length === 0
-      ? '<tr><td colspan="6" style="text-align:center;color:var(--gris);padding:24px">Sin alertas de stock</td></tr>'
-      : data.alertas.map(p => `
-          <tr>
-            <td class="cod">${p.codigo}</td>
-            <td>${p.categoria}</td>
-            <td>${p.marca}</td>
-            <td class="num">${p.cantidad}</td>
-            <td class="num">${p.stock_min}</td>
-            <td>${badge(p.estado)}</td>
-          </tr>`).join('');
   } catch(e) {}
 }
 
@@ -954,12 +984,17 @@ async function cargarInventario() {
 
     let url = `/api/productos?buscar=${encodeURIComponent(buscar)}&categoria=${encodeURIComponent(cat)}&estado=${encodeURIComponent(est)}`;
     productos = await apiFetch(url);
+    renderTabla();
+  } catch(e) {}
+}
 
-    // Cargar categorías y marcas para filtros/modales
+// Categorías y marcas: se cargan una sola vez (al iniciar y tras crear/editar/eliminar),
+// NO en cada búsqueda. Evita machacar el servidor con cada tecla.
+async function cargarFiltros() {
+  try {
     categorias = await apiFetch('/api/categorias');
     marcas     = await apiFetch('/api/marcas');
     llenarFiltros();
-    renderTabla();
   } catch(e) {}
 }
 
@@ -1022,7 +1057,7 @@ function renderTabla() {
           <td>${badge(p.estado)}</td>
           <td style="display:flex;gap:4px">
           <button class="btn btn-ghost" style="padding:4px 10px;font-size:11px" onclick="editarProducto(${p.id})">Editar</button>
-          <button class="btn btn-ghost" style="padding:4px 10px;font-size:11px;color:var(--rojo);border-color:var(--rojo)" onclick="eliminarProducto(${p.id},'${p.codigo}')">✕</button>
+          <button class="btn btn-ghost" style="padding:4px 10px;font-size:11px;color:var(--rojo);border-color:var(--rojo)" onclick="eliminarProducto(${p.id})">✕</button>
         </td>
         </tr>`).join('');
 
@@ -1043,60 +1078,12 @@ function renderTabla() {
 
 function irPag(n) { paginaActual = n; renderTabla(); }
 
-function renderTabla() {
-  const totalPags = Math.ceil(productos.length / POR_PAGINA);
-  if (paginaActual > totalPags) paginaActual = Math.max(1, totalPags);
-  const desde = (paginaActual - 1) * POR_PAGINA;
-  const pagina = productos.slice(desde, desde + POR_PAGINA);
-
-  const tbody = document.getElementById('tabla-inv');
-  tbody.innerHTML = pagina.length === 0
-    ? '<tr><td colspan="12" style="text-align:center;color:var(--gris);padding:32px">Sin resultados</td></tr>'
-    : pagina.map((p, i) => `
-        <tr>
-          <td style="color:var(--gris);font-size:11px">${desde+i+1}</td>
-          <td class="cod">${p.codigo}</td>
-          <td style="color:var(--gris);font-size:12px">${p.referencia||'—'}</td>
-          <td style="font-size:12px">${p.categoria}</td>
-          <td>${p.marca}</td>
-          <td>
-            <div class="cant-cell">
-              <button class="btn-cant" onclick="movRapido(${p.id},'salida')">−</button>
-              <span class="cant-val" style="color:${p.cantidad===0?'var(--rojo)':p.cantidad<=p.stock_min?'var(--amarillo)':'var(--verde)'}">${p.cantidad}</span>
-              <button class="btn-cant" onclick="movRapido(${p.id},'entrada')">+</button>
-            </div>
-          </td>
-          <td class="costo">${fmt(p.costo)}</td>
-          <td class="precio">${fmt(p.precio1)}</td>
-          <td class="precio">${fmt(p.precio2)}</td>
-          <td class="num">${fmt(p.valor_inventario||0)}</td>
-          <td>${badge(p.estado)}</td>
-          <td style="display:flex;gap:4px">
-          <button class="btn btn-ghost" style="padding:4px 10px;font-size:11px" onclick="editarProducto(${p.id})">Editar</button>
-          <button class="btn btn-ghost" style="padding:4px 10px;font-size:11px;color:var(--rojo);border-color:var(--rojo)" onclick="eliminarProducto(${p.id},'${p.codigo}')">✕</button>
-        </td>
-        </tr>`).join('');
-
-  document.getElementById('pag-info').textContent =
-    `Mostrando ${desde+1}–${Math.min(desde+POR_PAGINA,productos.length)} de ${productos.length} productos`;
-
-  let btns = '';
-  const totalP = Math.ceil(productos.length / POR_PAGINA);
-  if (totalP > 1) {
-    if (paginaActual > 1) btns += `<button class="page-btn" onclick="irPag(${paginaActual-1})">‹</button>`;
-    for (let n = Math.max(1,paginaActual-2); n<=Math.min(totalP,paginaActual+2); n++)
-      btns += `<button class="page-btn ${n===paginaActual?'active':''}" onclick="irPag(${n})">${n}</button>`;
-    if (paginaActual < totalP) btns += `<button class="page-btn" onclick="irPag(${paginaActual+1})">›</button>`;
-  }
-  document.getElementById('pag-btns').innerHTML = btns;
-}
-
 // ============================================================
 // MODAL PRODUCTO
 // ============================================================
 async function abrirModalProducto(id = null) {
   productoEditando = id;
-  await cargarInventario(); // Actualizar marcas y categorías
+  await cargarFiltros(); // Actualizar marcas y categorías del formulario
   document.getElementById('modal-prod-title').textContent = id ? 'Editar producto' : 'Nuevo producto';
   if (id) {
     const p = productos.find(x => x.id === id) || await apiFetch(`/api/productos/${id}`);
@@ -1154,6 +1141,7 @@ async function guardarProducto() {
       showToast('Producto agregado al inventario ✓');
     }
     cerrarModal();
+    cargarFiltros();
     cargarDashboard();
     cargarInventario();
   } catch(e) {}
@@ -1202,57 +1190,16 @@ async function confirmarMovRapido() {
 }
 
 // ============================================================
-// MOVIMIENTOS (sección)
-// ============================================================
-function selTipo(tipo) {
-  tipoMov = tipo;
-  document.getElementById('btn-entrada').className = 'tipo-btn entrada' + (tipo==='entrada'?' selected':'');
-  document.getElementById('btn-salida').className  = 'tipo-btn salida'  + (tipo==='salida' ?' selected':'');
-}
-
-async function buscarProductoMov() {
-  const cod = document.getElementById('mov-codigo').value.trim().toUpperCase();
-  if (cod.length < 2) { document.getElementById('mov-preview').style.display='none'; return; }
-  try {
-    const lista = await apiFetch(`/api/productos?buscar=${encodeURIComponent(cod)}`);
-    const p = lista.find(x => x.codigo.toUpperCase() === cod) || lista[0];
-    const prev = document.getElementById('mov-preview');
-    if (p) {
-      prev.style.display = 'block';
-      document.getElementById('mov-preview-info').textContent = `${p.codigo} · ${p.categoria} · ${p.marca}`;
-      document.getElementById('mov-stock-actual').textContent = `Stock actual: ${p.cantidad} unidades`;
-    } else { prev.style.display = 'none'; }
-  } catch(e) {}
-}
-
-async function registrarMovimiento() {
-  const cod  = document.getElementById('mov-codigo').value.trim();
-  const cant = parseFloat(document.getElementById('mov-cantidad').value)||0;
-  const nota = document.getElementById('mov-nota').value.trim();
-  if (!cod) { showToast('Ingresa el código del producto', 'error'); return; }
-  if (cant <= 0) { showToast('La cantidad debe ser mayor a 0', 'error'); return; }
-  try {
-    await apiFetch('/api/movimientos/por-codigo', {
-      method: 'POST',
-      body: JSON.stringify({ codigo: cod, tipo: tipoMov, cantidad: cant, nota })
-    });
-    showToast(`Movimiento registrado ✓`);
-    document.getElementById('mov-codigo').value = '';
-    document.getElementById('mov-cantidad').value = 1;
-    document.getElementById('mov-nota').value = '';
-    document.getElementById('mov-preview').style.display = 'none';
-    cargarDashboard();
-  } catch(e) {}
-}
-
-// ============================================================
 // ELIMINAR PRODUCTO
 // ============================================================
-async function eliminarProducto(id, codigo) {
+async function eliminarProducto(id) {
+  const p = productos.find(x => x.id === id);
+  const codigo = p ? p.codigo : ('#' + id);
   if (!confirm('¿Eliminar el producto ' + codigo + '?\nEsta acción no se puede deshacer.')) return;
   try {
     await apiFetch('/api/productos/' + id, { method: 'DELETE' });
     showToast('Producto ' + codigo + ' eliminado');
+    cargarFiltros();
     cargarDashboard();
     cargarInventario();
   } catch(e) {}
@@ -1270,7 +1217,7 @@ async function cargarHistorial() {
       return;
     }
     cont.innerHTML = historial.map(m => {
-      const fecha = new Date(m.fecha).toLocaleString('es-VE', {day:'2-digit',month:'2-digit',year:'2-digit',hour:'2-digit',minute:'2-digit'});
+      const fecha = fmtFecha(m.fecha);
       return `<div class="historial-item">
         <div class="mov-icon ${m.tipo}">${m.tipo==='entrada'?'▲':'▼'}</div>
         <div class="mov-info">
@@ -1350,7 +1297,7 @@ async function generarRespaldoManual() {
 // ============================================================
 // INIT
 // ============================================================
-if (sessionStorage.getItem('rp_logueado')) { iniciarApp(); }
+if (sessionStorage.getItem('rp_token')) { iniciarApp(); }
 </script>
 </div>
 </body>

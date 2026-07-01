@@ -1,0 +1,16 @@
+# Respaldos y archivos temporales de SQLite (NO deben ir al repo)
+backups/
+*.db-wal
+*.db-shm
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Entorno local
+.env
+
+# NOTA: inventario.db SÍ se versiona a propósito: es la semilla inicial
+# que llena el Volume la primera vez. No subas cambios locales a ese archivo.
